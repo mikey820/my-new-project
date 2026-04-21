@@ -114,7 +114,11 @@ public class ResourcesArscEditor {
 
         // Find "xml" type index (0-based in typeNames → 1-based typeId in resource IDs)
         int xmlTypeIdx = findString(typeNames, "xml");
-        if (xmlTypeIdx < 0) throw new IOException("No 'xml' resource type found in resources.arsc");
+        if (xmlTypeIdx < 0) {
+            // App has no xml resource type at all — create one from scratch
+            return createXmlTypeAndEntry(arsc, gspOffset, gspSize, globalStrings, gspUtf8, gspFlags,
+                    pkgOffset, pkgChunkSize, pkgHeaderSize, typeNames, keyNames, packageId);
+        }
         int xmlTypeId = xmlTypeIdx + 1; // 1-based
 
         // Check if "network_security_config" key already exists
@@ -403,6 +407,139 @@ public class ResourcesArscEditor {
             buf.position(cs + sz);
         }
         return 0;
+    }
+
+    // -----------------------------------------------------------------------
+    // Create a brand-new "xml" resource type when the app has none
+    // -----------------------------------------------------------------------
+
+    private static Result createXmlTypeAndEntry(byte[] arsc,
+            int gspOffset, int gspSize, List<String> globalStrings, boolean utf8, int gspFlags,
+            int pkgOffset, int pkgChunkSize, int pkgHeaderSize,
+            List<String> typeNames, List<String> keyNames, int packageId) throws IOException {
+
+        // Add file path to global string pool
+        String filePath = "res/xml/network_security_config.xml";
+        int filePathIdx = findString(globalStrings, filePath);
+        if (filePathIdx < 0) {
+            globalStrings.add(filePath);
+            filePathIdx = globalStrings.size() - 1;
+        }
+
+        // Add "xml" type and "network_security_config" key
+        typeNames.add("xml");
+        int newTypeId = typeNames.size(); // 1-indexed
+        keyNames.add("network_security_config");
+        int newKeyIdx = keyNames.size() - 1;
+
+        byte[] newGsp      = serializeStringPool(globalStrings, utf8, gspFlags);
+        byte[] newTSP      = serializeStringPool(typeNames, utf8, utf8 ? 0x100 : 0);
+        byte[] newKSP      = serializeStringPool(keyNames,  utf8, utf8 ? 0x100 : 0);
+        byte[] newTypeSpec = buildNewTypeSpec(newTypeId);
+        byte[] newTypeChk  = buildNewTypeChunk(newTypeId, newKeyIdx, filePathIdx);
+
+        // Read original package to extract name and existing type data
+        ByteBuffer pbuf = ByteBuffer.wrap(arsc, pkgOffset, pkgChunkSize).order(ByteOrder.LITTLE_ENDIAN);
+        pbuf.getShort(); pbuf.getShort(); pbuf.getInt(); // chunk header
+        pbuf.getInt();                                   // packageId
+        byte[] pkgName = new byte[256]; pbuf.get(pkgName);
+        pbuf.getInt(); pbuf.getInt(); pbuf.getInt(); pbuf.getInt(); pbuf.getInt(); // field offsets
+
+        // Skip old typeStrings + keyStrings pools
+        int tspStart = pkgHeaderSize;
+        pbuf.position(tspStart);
+        pbuf.getShort(); pbuf.getShort(); int oldTspSize = pbuf.getInt();
+        pbuf.position(tspStart + oldTspSize);
+        pbuf.getShort(); pbuf.getShort(); int oldKspSize = pbuf.getInt();
+        int existingDataStart = tspStart + oldTspSize + oldKspSize;
+        int existingDataLen   = pkgChunkSize - existingDataStart;
+        byte[] existingData = new byte[existingDataLen];
+        System.arraycopy(arsc, pkgOffset + existingDataStart, existingData, 0, existingDataLen);
+
+        // Build new package chunk
+        int newPkgSize = pkgHeaderSize + newTSP.length + newKSP.length
+                + existingDataLen + newTypeSpec.length + newTypeChk.length;
+        ByteArrayOutputStream pkg = new ByteArrayOutputStream();
+        writeShortLE(pkg, RES_TABLE_PACKAGE_TYPE);
+        writeShortLE(pkg, pkgHeaderSize);
+        writeIntLE(pkg, newPkgSize);
+        writeIntLE(pkg, packageId & 0x7f);
+        pkg.write(pkgName);
+        writeIntLE(pkg, pkgHeaderSize);                       // typeStrings offset
+        writeIntLE(pkg, newTypeId);                           // lastPublicType
+        writeIntLE(pkg, pkgHeaderSize + newTSP.length);       // keyStrings offset
+        writeIntLE(pkg, newKeyIdx);                           // lastPublicKey
+        writeIntLE(pkg, 0);                                   // typeIdOffset
+        pkg.write(newTSP);
+        pkg.write(newKSP);
+        pkg.write(existingData);
+        pkg.write(newTypeSpec);
+        pkg.write(newTypeChk);
+
+        // Assemble full resources.arsc
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        writeShortLE(out, RES_TABLE_TYPE);
+        writeShortLE(out, 12);
+        writeIntLE(out, 12 + newGsp.length + newPkgSize);
+        writeIntLE(out, 1); // packageCount
+        out.write(newGsp);
+        out.write(pkg.toByteArray());
+
+        int newResId = (packageId << 24) | (newTypeId << 16) | 0;
+        return new Result(out.toByteArray(), newResId);
+    }
+
+    /** ResTable_typeSpec for a single-entry type. */
+    private static byte[] buildNewTypeSpec(int typeId) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        writeShortLE(out, RES_TABLE_TYPESPEC_TYPE); // 0x0202
+        writeShortLE(out, 16);   // headerSize = sizeof(ResTable_typeSpec)
+        writeIntLE(out, 20);     // chunkSize = 16 + 1*4
+        out.write(typeId & 0xFF);
+        out.write(0);            // res0
+        writeShortLE(out, 0);    // res1
+        writeIntLE(out, 1);      // entryCount
+        writeIntLE(out, 0);      // specFlags[0] = 0
+        return out.toByteArray();
+    }
+
+    /** ResTable_type with one entry pointing to a string (file path) in the global pool. */
+    private static byte[] buildNewTypeChunk(int typeId, int keyIdx, int filePathStrIdx)
+            throws IOException {
+        // ResTable_config: 48 bytes (all zeros = default/any config, with size=48)
+        int configSize = 48;
+        // headerSize = ResChunk_header(8) + id(1)+flags(1)+reserved(2) + entryCount(4)
+        //            + entriesStart(4) + config(configSize) = 20 + configSize
+        int headerSize   = 20 + configSize; // = 68
+        int entryCount   = 1;
+        int entriesStart = headerSize + entryCount * 4; // 68 + 4 = 72
+        // Entry = ResTable_entry(8) + Res_value(8) = 16 bytes
+        int chunkSize = entriesStart + 16;
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        writeShortLE(out, RES_TABLE_TYPE_TYPE); // 0x0201
+        writeShortLE(out, headerSize);
+        writeIntLE(out, chunkSize);
+        out.write(typeId & 0xFF);
+        out.write(0);            // flags
+        writeShortLE(out, 0);   // reserved
+        writeIntLE(out, entryCount);
+        writeIntLE(out, entriesStart);
+        // ResTable_config (48 bytes)
+        writeIntLE(out, configSize); // config.size
+        for (int i = 0; i < configSize - 4; i++) out.write(0); // remaining config bytes
+        // Offsets array: offset[0] = 0
+        writeIntLE(out, 0);
+        // ResTable_entry
+        writeShortLE(out, 8);   // entry.size
+        writeShortLE(out, 0);   // entry.flags (simple, not complex)
+        writeIntLE(out, keyIdx);
+        // Res_value
+        writeShortLE(out, 8);   // value.size
+        out.write(0);           // value.res0
+        out.write(0x03);        // value.dataType = TYPE_STRING
+        writeIntLE(out, filePathStrIdx);
+        return out.toByteArray();
     }
 
     // -----------------------------------------------------------------------
