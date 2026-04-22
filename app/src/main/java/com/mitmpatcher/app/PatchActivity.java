@@ -1,5 +1,6 @@
 package com.mitmpatcher.app;
 
+import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.view.MenuItem;
 import android.view.View;
@@ -19,15 +20,17 @@ public class PatchActivity extends AppCompatActivity {
     public static final String EXTRA_PACKAGE_NAME = "package_name";
     public static final String EXTRA_APP_NAME     = "app_name";
 
-    private ProgressBar progressBar;
-    private TextView    progressPercent;
+    private ProgressBar  progressBar;
+    private TextView     progressPercent;
     private RecyclerView logRecycler;
-    private Button      uninstallBtn;
-    private Button      installBtn;
-    private LogAdapter  logAdapter;
+    private Button       uninstallBtn;
+    private Button       installBtn;
+    private LogAdapter   logAdapter;
 
-    private File patchedApk;
-    private String packageName;
+    private File    patchedApk;
+    private String  packageName;
+    private boolean patchComplete      = false;
+    private boolean uninstallTriggered = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -39,27 +42,40 @@ public class PatchActivity extends AppCompatActivity {
         setTitle("Patching: " + appName);
         if (getSupportActionBar() != null) getSupportActionBar().setDisplayHomeAsUpEnabled(true);
 
-        progressBar    = findViewById(R.id.progress_bar);
+        progressBar     = findViewById(R.id.progress_bar);
         progressPercent = findViewById(R.id.progress_percent);
-        logRecycler    = findViewById(R.id.log_recycler);
-        uninstallBtn   = findViewById(R.id.btn_uninstall);
-        installBtn     = findViewById(R.id.btn_install);
+        logRecycler     = findViewById(R.id.log_recycler);
+        uninstallBtn    = findViewById(R.id.btn_uninstall);
+        installBtn      = findViewById(R.id.btn_install);
 
-        List<String> logs = new ArrayList<>();
-        logAdapter = new LogAdapter(logs);
+        logAdapter = new LogAdapter(new ArrayList<>());
         logRecycler.setLayoutManager(new LinearLayoutManager(this));
         logRecycler.setAdapter(logAdapter);
 
-        uninstallBtn.setOnClickListener(v -> confirmUninstall());
-        installBtn.setOnClickListener(v -> {
-            if (patchedApk != null) {
-                try { InstallHelper.promptInstall(this, patchedApk); }
-                catch (Exception e) { showError("Install error: " + e.getMessage()); }
-            }
-        });
+        uninstallBtn.setOnClickListener(v -> triggerUninstall());
+        installBtn.setOnClickListener(v -> triggerInstall());
 
         startPatch();
     }
+
+    // -----------------------------------------------------------------------
+    // onResume — auto-trigger install once the original app is gone
+    // -----------------------------------------------------------------------
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (uninstallTriggered && patchedApk != null && !isPackageInstalled(packageName)) {
+            uninstallTriggered = false;
+            logAdapter.add("Original app uninstalled — launching installer…");
+            logRecycler.smoothScrollToPosition(logAdapter.getItemCount() - 1);
+            triggerInstall();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Patching
+    // -----------------------------------------------------------------------
 
     private void startPatch() {
         ApkPatcher patcher = new ApkPatcher(this);
@@ -78,14 +94,16 @@ public class PatchActivity extends AppCompatActivity {
             }
             @Override public void onDone(File apk) {
                 patchedApk = apk;
+                patchComplete = true;
                 runOnUiThread(() -> {
                     progressBar.setProgress(100);
                     progressPercent.setText("Complete!");
+                    logAdapter.add("────────────────────────────────────");
+                    logAdapter.add("Patching finished — ready to install");
+                    logRecycler.smoothScrollToPosition(logAdapter.getItemCount() - 1);
                     uninstallBtn.setVisibility(View.VISIBLE);
                     installBtn.setVisibility(View.VISIBLE);
-                    logAdapter.add("─────────────────────────────────");
-                    logAdapter.add("Tap UNINSTALL, then INSTALL PATCHED APK");
-                    logRecycler.smoothScrollToPosition(logAdapter.getItemCount() - 1);
+                    showReadyDialog();
                 });
             }
             @Override public void onError(String msg) {
@@ -94,18 +112,66 @@ public class PatchActivity extends AppCompatActivity {
         });
     }
 
-    private void confirmUninstall() {
+    // -----------------------------------------------------------------------
+    // Install flow
+    // -----------------------------------------------------------------------
+
+    /** Step 1 — uninstall original. */
+    private void triggerUninstall() {
         new AlertDialog.Builder(this)
-                .setTitle("Uninstall original?")
-                .setMessage("This will remove the original app. Install the patched APK immediately after.")
-                .setPositiveButton("Uninstall", (d, w) ->
-                        InstallHelper.promptUninstall(this, packageName))
+                .setTitle("Uninstall original app?")
+                .setMessage("The original app will be removed.\n\nAfter uninstalling, return here and the patched APK installer will launch automatically.")
+                .setPositiveButton("Uninstall", (d, w) -> {
+                    uninstallTriggered = true;
+                    logAdapter.add("Launching system uninstall dialog…");
+                    InstallHelper.promptUninstall(this, packageName);
+                })
                 .setNegativeButton("Cancel", null)
                 .show();
     }
 
+    /** Step 2 — install patched APK. */
+    private void triggerInstall() {
+        if (patchedApk == null) return;
+        logAdapter.add("Launching installer for patched APK…");
+        try {
+            InstallHelper.promptInstall(this, patchedApk);
+        } catch (Exception e) {
+            showError("Install error: " + e.getMessage());
+        }
+    }
+
+    /** Auto-shown when patching finishes — walks the user through both steps. */
+    private void showReadyDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("Patch complete!")
+                .setMessage(
+                    "The patched APK is ready.\n\n" +
+                    "Step 1 → Tap \"Uninstall\" to remove the original app.\n\n" +
+                    "Step 2 → The installer will open automatically when uninstall finishes.\n\n" +
+                    "Tap below to start uninstalling now.")
+                .setPositiveButton("Uninstall now", (d, w) -> triggerUninstall())
+                .setNegativeButton("I'll do it manually", null)
+                .setCancelable(false)
+                .show();
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    private boolean isPackageInstalled(String pkg) {
+        try {
+            getPackageManager().getApplicationInfo(pkg, 0);
+            return true;
+        } catch (PackageManager.NameNotFoundException e) {
+            return false;
+        }
+    }
+
     private void showError(String msg) {
         logAdapter.add("ERROR: " + msg);
+        logRecycler.smoothScrollToPosition(logAdapter.getItemCount() - 1);
         new AlertDialog.Builder(this)
                 .setTitle("Error")
                 .setMessage(msg)
@@ -135,20 +201,26 @@ public class PatchActivity extends AppCompatActivity {
         @Override public VH onCreateViewHolder(android.view.ViewGroup p, int t) {
             TextView tv = new TextView(p.getContext());
             tv.setTextSize(12);
-            tv.setPadding(16, 4, 16, 4);
-            tv.setFontFeatureSettings("tnum");
+            tv.setPadding(24, 5, 24, 5);
             tv.setTypeface(android.graphics.Typeface.MONOSPACE);
             return new VH(tv);
         }
+
         @Override public void onBindViewHolder(VH h, int pos) {
             String msg = items.get(pos);
             ((TextView) h.itemView).setText(msg);
-            int color = msg.startsWith("ERROR")
-                    ? 0xFFE53935
-                    : msg.startsWith("Done") ? 0xFF43A047
-                    : 0xFF212121;
+            int color;
+            if (msg.startsWith("ERROR"))               color = 0xFFE53935;
+            else if (msg.startsWith("──"))             color = 0xFF9E9E9E;
+            else if (msg.contains("finished") ||
+                     msg.contains("complete") ||
+                     msg.contains("signed") ||
+                     msg.startsWith("Done"))           color = 0xFF43A047;
+            else if (msg.startsWith("  [sign]"))       color = 0xFF1565C0;
+            else                                       color = 0xFF212121;
             ((TextView) h.itemView).setTextColor(color);
         }
+
         @Override public int getItemCount() { return items.size(); }
 
         static class VH extends RecyclerView.ViewHolder {

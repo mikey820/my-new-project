@@ -1,10 +1,70 @@
-<vector xmlns:android="http://schemas.android.com/apk/apk/res/android"
-    android:width="24dp"
-    android:height="24dp"
-    android:viewportWidth="24"
-    android:viewportHeight="24"
-    android:tint="?attr/colorControlNormal">
-  <path
-      android:fillColor="@android:color/white"
-      android:pathData="M12,1L3,5v6c0,5.55 3.84,10.74 9,12c5.16,-1.26 9,-6.45 9,-12V5L12,1zM12,11.99h7c-0.53,4.12 -3.28,7.79 -7,8.94V12H5V6.3l7,-3.11V11.99z"/>
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Icon concept: shield (security) with two opposing arrows inside (MITM intercept).
+  Teal arrow = outbound traffic. Orange arrow = intercepted response.
+  White dot = the interception point (the "man in the middle").
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Dark navy background -->
+    <path
+        android:fillColor="#0D1B2A"
+        android:pathData="M0,0h108v108h-108z" />
+
+    <!-- Subtle gradient overlay (lighter centre) -->
+    <path
+        android:fillColor="#141E30"
+        android:pathData="M54,10 A44,44 0 1,1 54,98 A44,44 0 1,1 54,10 Z" />
+
+    <!-- Shield body (white) -->
+    <path
+        android:fillColor="#E8EAF6"
+        android:pathData="M54,16 L18,30 L18,56 C18,76 34,91 54,97 C74,91 90,76 90,56 L90,30 Z" />
+
+    <!-- Shield interior (deep blue) -->
+    <path
+        android:fillColor="#1A237E"
+        android:pathData="M54,24 L26,36 L26,56 C26,72 38,84 54,89 C70,84 82,72 82,56 L82,36 Z" />
+
+    <!-- Outbound arrow → (teal, top) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1DE9B6"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M34,46 L68,46" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1DE9B6"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M60,38 L68,46 L60,54" />
+
+    <!-- Intercepted arrow ← (orange, bottom) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF6D00"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M74,64 L40,64" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF6D00"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M48,56 L40,64 L48,72" />
+
+    <!-- Centre interception dot (white) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,51 A5,5 0 1,1 54,61 A5,5 0 1,1 54,51 Z" />
+
 </vector>
