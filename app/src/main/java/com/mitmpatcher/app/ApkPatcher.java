@@ -20,13 +20,15 @@ public class ApkPatcher {
         void onError(String message);
     }
 
+    // Matches apk-mitm exactly: trust system + user CAs, allow cleartext (HTTP) traffic
+    // https://github.com/niklashigi/apk-mitm
     private static final String NETWORK_SECURITY_CONFIG_XML =
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
             "<network-security-config>\n" +
             "    <base-config cleartextTrafficPermitted=\"true\">\n" +
             "        <trust-anchors>\n" +
-            "            <certificates src=\"system\"/>\n" +
-            "            <certificates src=\"user\"/>\n" +
+            "            <certificates src=\"system\" />\n" +
+            "            <certificates src=\"user\" />\n" +
             "        </trust-anchors>\n" +
             "    </base-config>\n" +
             "</network-security-config>";
@@ -40,7 +42,9 @@ public class ApkPatcher {
             try {
                 doPatch(packageName, cb);
             } catch (Exception e) {
-                cb.onError("Unexpected error: " + e.getMessage());
+                String msg = e.getMessage();
+                if (msg == null || msg.isEmpty()) msg = e.getClass().getSimpleName();
+                cb.onError("Unexpected error: " + msg + " (" + e.getClass().getSimpleName() + ")");
             }
         }, "apk-patcher").start();
     }
@@ -101,11 +105,18 @@ public class ApkPatcher {
         cb.onStep("APK rebuilt (" + (patchedApk.length() / 1024) + " KB)");
 
         // ── 7. Sign ───────────────────────────────────────────────────────────
-        cb.onStep("Signing APK (V1)…");
+        cb.onStep("─── Signing APK (V1 JAR) ───");
         cb.onProgress(80);
         ApkSigner signer = new ApkSigner(ctx);
-        File signedApk = signer.sign(patchedApk);
-        cb.onStep("APK signed: " + signedApk.getName());
+        final int[] signingProgress = {80};
+        File signedApk = signer.sign(patchedApk, msg -> {
+            cb.onStep("  [sign] " + msg);
+            if (signingProgress[0] < 97) {
+                signingProgress[0] += 3;
+                cb.onProgress(signingProgress[0]);
+            }
+        });
+        cb.onStep("APK signed successfully → " + signedApk.getName());
 
         // ── 8. Done ───────────────────────────────────────────────────────────
         cb.onProgress(100);
