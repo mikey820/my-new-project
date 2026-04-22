@@ -438,14 +438,16 @@ public class ResourcesArscEditor {
         byte[] newTypeSpec = buildNewTypeSpec(newTypeId);
         byte[] newTypeChk  = buildNewTypeChunk(newTypeId, newKeyIdx, filePathIdx);
 
-        // Read original package to extract name and existing type data
-        ByteBuffer pbuf = ByteBuffer.wrap(arsc, pkgOffset, pkgChunkSize).order(ByteOrder.LITTLE_ENDIAN);
+        // Copy package chunk into its own array so all positions are relative to 0
+        byte[] origPkg = new byte[pkgChunkSize];
+        System.arraycopy(arsc, pkgOffset, origPkg, 0, pkgChunkSize);
+        ByteBuffer pbuf = ByteBuffer.wrap(origPkg).order(ByteOrder.LITTLE_ENDIAN);
         pbuf.getShort(); pbuf.getShort(); pbuf.getInt(); // chunk header
         pbuf.getInt();                                   // packageId
         byte[] pkgName = new byte[256]; pbuf.get(pkgName);
         pbuf.getInt(); pbuf.getInt(); pbuf.getInt(); pbuf.getInt(); pbuf.getInt(); // field offsets
 
-        // Skip old typeStrings + keyStrings pools
+        // Skip old typeStrings + keyStrings pools (positions are now relative to package start)
         int tspStart = pkgHeaderSize;
         pbuf.position(tspStart);
         pbuf.getShort(); pbuf.getShort(); int oldTspSize = pbuf.getInt();
@@ -453,8 +455,9 @@ public class ResourcesArscEditor {
         pbuf.getShort(); pbuf.getShort(); int oldKspSize = pbuf.getInt();
         int existingDataStart = tspStart + oldTspSize + oldKspSize;
         int existingDataLen   = pkgChunkSize - existingDataStart;
+        if (existingDataLen < 0) existingDataLen = 0;
         byte[] existingData = new byte[existingDataLen];
-        System.arraycopy(arsc, pkgOffset + existingDataStart, existingData, 0, existingDataLen);
+        System.arraycopy(origPkg, existingDataStart, existingData, 0, existingDataLen);
 
         // Build new package chunk
         int newPkgSize = pkgHeaderSize + newTSP.length + newKSP.length
