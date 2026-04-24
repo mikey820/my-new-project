@@ -2,6 +2,8 @@ package com.mitmpatcher.app;
 
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.MenuItem;
 import android.view.View;
 import android.widget.Button;
@@ -121,18 +123,21 @@ public class PatchActivity extends AppCompatActivity {
         uninstallTriggered = true;
         logAdapter.add("Launching system uninstall dialog…");
         logRecycler.smoothScrollToPosition(logAdapter.getItemCount() - 1);
-        InstallHelper.promptUninstall(this, packageName);
+        new Handler(Looper.getMainLooper()).post(() ->
+                InstallHelper.promptUninstall(this, packageName));
     }
 
     /** Step 2 — install patched APK. */
     private void triggerInstall() {
         if (patchedApk == null) return;
         logAdapter.add("Launching installer for patched APK…");
-        try {
-            InstallHelper.promptInstall(this, patchedApk);
-        } catch (Exception e) {
-            showError("Install error: " + e.getMessage());
-        }
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                InstallHelper.promptInstall(this, patchedApk);
+            } catch (Exception e) {
+                showError("Install error: " + e.getMessage());
+            }
+        });
     }
 
     /** Auto-shown when patching finishes — walks the user through both steps. */
