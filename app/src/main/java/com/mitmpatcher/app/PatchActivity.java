@@ -123,8 +123,7 @@ public class PatchActivity extends AppCompatActivity {
         uninstallTriggered = true;
         logAdapter.add("Launching system uninstall dialog…");
         logRecycler.smoothScrollToPosition(logAdapter.getItemCount() - 1);
-        new Handler(Looper.getMainLooper()).post(() ->
-                InstallHelper.promptUninstall(this, packageName));
+        InstallHelper.promptUninstall(this, packageName);
     }
 
     /** Step 2 — install patched APK. */

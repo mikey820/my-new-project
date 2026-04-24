@@ -14,9 +14,11 @@ import java.io.*;
 public class InstallHelper {
 
     /** Launch system uninstall dialog for the given package. */
+    @SuppressWarnings("deprecation")
     public static void promptUninstall(Context ctx, String packageName) {
-        Intent intent = new Intent(Intent.ACTION_DELETE);
+        Intent intent = new Intent(Intent.ACTION_UNINSTALL_PACKAGE);
         intent.setData(Uri.parse("package:" + packageName));
+        intent.putExtra(Intent.EXTRA_RETURN_RESULT, false);
         ctx.startActivity(intent);
     }
 
