@@ -131,13 +131,10 @@ public class ApkPatcher {
     private void rebuildApk(File src, File dst, byte[] newManifest, byte[] newArsc)
             throws IOException {
 
-        try (ZipFile  zin  = new ZipFile(src);
-             ZipOutputStream zout = new ZipOutputStream(new FileOutputStream(dst))) {
+        try (ZipFile zin = new ZipFile(src);
+             ApkZipWriter zout = new ApkZipWriter(dst)) {
 
-            zout.setLevel(ZipEntry.DEFLATED);
             java.util.Enumeration<? extends ZipEntry> entries = zin.entries();
-
-            boolean nscWritten = false;
             while (entries.hasMoreElements()) {
                 ZipEntry ze = entries.nextElement();
                 String name = ze.getName();
@@ -145,7 +142,7 @@ public class ApkPatcher {
                 // Drop old signature files
                 if (name.startsWith("META-INF/")) continue;
                 // Replace network_security_config if it already exists (we'll re-add ours below)
-                if (name.equals("res/xml/network_security_config.xml")) { nscWritten = false; continue; }
+                if (name.equals("res/xml/network_security_config.xml")) continue;
 
                 byte[] data;
                 if (name.equals("AndroidManifest.xml")) {
@@ -156,19 +153,25 @@ public class ApkPatcher {
                     data = readEntry(zin, ze);
                 }
 
-                ZipEntry out = new ZipEntry(name);
-                zout.putNextEntry(out);
-                zout.write(data);
-                zout.closeEntry();
+                zout.writeEntry(name, data, methodFor(name, ze.getMethod()));
             }
 
-            // Always write our network_security_config.xml
+            // Always write our network_security_config.xml (deflated is fine for this)
             byte[] nscBytes = NETWORK_SECURITY_CONFIG_XML.getBytes("UTF-8");
-            ZipEntry nscEntry = new ZipEntry("res/xml/network_security_config.xml");
-            zout.putNextEntry(nscEntry);
-            zout.write(nscBytes);
-            zout.closeEntry();
+            zout.writeEntry("res/xml/network_security_config.xml", nscBytes, ZipEntry.DEFLATED);
         }
+    }
+
+    /**
+     * Entries that MUST be STORED (uncompressed) + 4-byte aligned on Android 11+ (API 30+):
+     *   • resources.arsc  — required to be STORED, docs:
+     *     https://developer.android.com/about/versions/11/behavior-changes-11#resources-file
+     *   • lib/{abi}/*.so  — required to be STORED when extractNativeLibs=false (default on API 30+)
+     */
+    static int methodFor(String name, int originalMethod) {
+        if (name.equals("resources.arsc")) return ZipEntry.STORED;
+        if (name.startsWith("lib/") && name.endsWith(".so")) return ZipEntry.STORED;
+        return originalMethod == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED;
     }
 
     // -----------------------------------------------------------------------

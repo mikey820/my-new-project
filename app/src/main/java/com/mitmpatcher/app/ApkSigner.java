@@ -84,10 +84,11 @@ public class ApkSigner {
 
         log.log("Opening APK for signing…");
         ZipFile zf = new ZipFile(input);
-        Map<String, byte[]> entryData = new LinkedHashMap<>();
+        Map<String, byte[]>  entryData   = new LinkedHashMap<>();
+        Map<String, Integer> entryMethod = new LinkedHashMap<>();
         MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
 
-        // Phase 1 — compute per-entry SHA-256 digests
+        // Phase 1 — compute per-entry SHA-256 digests (preserving original method)
         log.log("Computing SHA-256 digests for " + zf.size() + " entries…");
         Manifest manifest = new Manifest();
         manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
@@ -100,6 +101,7 @@ public class ApkSigner {
             if (ze.getName().startsWith("META-INF/")) continue;
             byte[] data = readEntry(zf, ze);
             entryData.put(ze.getName(), data);
+            entryMethod.put(ze.getName(), ze.getMethod());
             sha256.reset();
             byte[] digest = sha256.digest(data);
             Attributes attrs = new Attributes();
@@ -152,28 +154,19 @@ public class ApkSigner {
         byte[] pkcs7Der = buildPkcs7(rawSig, certDer, cert);
         log.log("PKCS#7 block: " + pkcs7Der.length + " bytes");
 
-        // Phase 6 — write output ZIP
+        // Phase 6 — write output ZIP (preserving method + 4-byte aligning STORED entries)
         log.log("Writing signed APK to " + output.getName() + "…");
-        try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(output))) {
-            zos.setLevel(Deflater.NO_COMPRESSION);
+        try (ApkZipWriter zout = new ApkZipWriter(output)) {
             for (Map.Entry<String, byte[]> e : entryData.entrySet()) {
-                ZipEntry ze = new ZipEntry(e.getKey());
-                zos.putNextEntry(ze);
-                zos.write(e.getValue());
-                zos.closeEntry();
+                String name = e.getKey();
+                int method = ApkPatcher.methodFor(name, entryMethod.get(name));
+                zout.writeEntry(name, e.getValue(), method);
             }
-            putMeta(zos, "META-INF/MANIFEST.MF", mfBytes);
-            putMeta(zos, "META-INF/CERT.SF",     sfBytes);
-            putMeta(zos, "META-INF/CERT.RSA",    pkcs7Der);
+            zout.writeEntry("META-INF/MANIFEST.MF", mfBytes,  ZipEntry.DEFLATED);
+            zout.writeEntry("META-INF/CERT.SF",     sfBytes,  ZipEntry.DEFLATED);
+            zout.writeEntry("META-INF/CERT.RSA",    pkcs7Der, ZipEntry.DEFLATED);
         }
         log.log("Signed APK written (" + (output.length() / 1024) + " KB)");
-    }
-
-    private static void putMeta(ZipOutputStream zos, String name, byte[] data)
-            throws IOException {
-        zos.putNextEntry(new ZipEntry(name));
-        zos.write(data);
-        zos.closeEntry();
     }
 
     // -----------------------------------------------------------------------
