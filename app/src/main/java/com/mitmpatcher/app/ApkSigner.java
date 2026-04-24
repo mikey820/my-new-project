@@ -65,8 +65,13 @@ public class ApkSigner {
         X509Certificate cert = (X509Certificate) ks.getCertificate(KEY_ALIAS);
         log.log("Key loaded — subject: " + cert.getSubjectX500Principal().getName());
 
+        File v1Apk = new File(ctx.getCacheDir(), "v1_" + unsignedApk.getName());
+        signJar(unsignedApk, v1Apk, pk, cert, log);
+
+        log.log("─── Applying APK Signature Scheme v2 ───");
         File signedApk = new File(ctx.getCacheDir(), "signed_" + unsignedApk.getName());
-        signJar(unsignedApk, signedApk, pk, cert, log);
+        signV2(v1Apk, signedApk, pk, cert, log);
+        v1Apk.delete();
         return signedApk;
     }
 
@@ -265,6 +270,220 @@ public class ApkSigner {
         if (len < 128)       { o.write(len); }
         else if (len < 256)  { o.write(0x81); o.write(len); }
         else                 { o.write(0x82); o.write((len >> 8) & 0xFF); o.write(len & 0xFF); }
+    }
+
+    // -----------------------------------------------------------------------
+    // APK Signature Scheme v2
+    // (required on Android 11+ for APKs targeting API 30+)
+    // https://source.android.com/docs/security/features/apksigning/v2
+    // -----------------------------------------------------------------------
+
+    private static final byte[] APK_SIG_BLOCK_MAGIC =
+            "APK Sig Block 42".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    private static final int V2_BLOCK_ID                = 0x7109871a;
+    private static final int SIG_ALGO_RSA_PKCS1_SHA256  = 0x0103;
+    private static final int CHUNK_SIZE                 = 1024 * 1024;
+
+    private void signV2(File input, File output, PrivateKey pk, X509Certificate cert,
+            Logger log) throws Exception {
+
+        log.log("Reading v1-signed APK (" + input.length() + " bytes)…");
+        byte[] apk = readAllBytes(input);
+
+        // ── Locate ZIP End-Of-Central-Directory ──
+        int eocdOffset = findEocd(apk);
+        if (eocdOffset < 0) throw new IOException("EOCD not found in APK");
+        int cdSize   = readUint32Le(apk, eocdOffset + 12);
+        int cdOffset = readUint32Le(apk, eocdOffset + 16);
+        log.log("ZIP layout: entries=0..." + cdOffset + ", CD=" + cdSize + "B @" + cdOffset
+                + ", EOCD @" + eocdOffset);
+
+        // ── Compute chunked APK digest over entries + CD + EOCD ──
+        log.log("Computing chunked SHA-256 digest…");
+        byte[] apkDigest = computeApkChunkDigest(apk, cdOffset, eocdOffset);
+        log.log("APK digest: " + bytesToHex(apkDigest, 8) + "…");
+
+        // ── Build signed data, sign it ──
+        byte[] signedData = buildSignedData(apkDigest, cert);
+        log.log("Signing signed-data (" + signedData.length + " bytes) with RSA-SHA256…");
+        Signature sig = Signature.getInstance("SHA256withRSA");
+        sig.initSign(pk);
+        sig.update(signedData);
+        byte[] signature = sig.sign();
+
+        byte[] pubKeyDer = cert.getPublicKey().getEncoded();
+
+        // ── Build v2 block value and outer signing block ──
+        byte[] v2BlockValue = buildV2BlockValue(signedData, signature, pubKeyDer);
+        byte[] signingBlock = buildSigningBlock(v2BlockValue);
+        log.log("Signing block built (" + signingBlock.length + " bytes)");
+
+        // ── Write output APK with signing block inserted before CD ──
+        log.log("Writing v2-signed APK…");
+        try (OutputStream out = new BufferedOutputStream(new FileOutputStream(output))) {
+            out.write(apk, 0, cdOffset);            // ZIP entries
+            out.write(signingBlock);                // APK Signing Block (new)
+            out.write(apk, cdOffset, cdSize);       // Central Directory
+
+            // EOCD with patched CD offset
+            int newCdOffset = cdOffset + signingBlock.length;
+            byte[] eocd = java.util.Arrays.copyOfRange(apk, eocdOffset, apk.length);
+            writeUint32Le(eocd, 16, newCdOffset);
+            out.write(eocd);
+        }
+        log.log("v2 signature applied ✔");
+    }
+
+    // ---- APK digest (chunked SHA-256 per v2 spec) ----
+
+    private static byte[] computeApkChunkDigest(byte[] apk, int cdOffset, int eocdOffset)
+            throws Exception {
+        MessageDigest md = MessageDigest.getInstance("SHA-256");
+        List<byte[]> chunkDigests = new ArrayList<>();
+
+        int[][] regions = { {0, cdOffset}, {cdOffset, eocdOffset}, {eocdOffset, apk.length} };
+        for (int[] r : regions) {
+            for (int off = r[0]; off < r[1]; off += CHUNK_SIZE) {
+                int len = Math.min(CHUNK_SIZE, r[1] - off);
+                md.reset();
+                md.update((byte) 0xa5);
+                md.update(leUint32(len));
+                md.update(apk, off, len);
+                chunkDigests.add(md.digest());
+            }
+        }
+
+        md.reset();
+        md.update((byte) 0x5a);
+        md.update(leUint32(chunkDigests.size()));
+        for (byte[] cd : chunkDigests) md.update(cd);
+        return md.digest();
+    }
+
+    // ---- v2 block builders ----
+
+    private static byte[] buildSignedData(byte[] apkDigest, X509Certificate cert) throws Exception {
+        // digests: LP sequence of LP (algoId + LP digest)
+        ByteArrayOutputStream digestEntry = new ByteArrayOutputStream();
+        digestEntry.write(leUint32(SIG_ALGO_RSA_PKCS1_SHA256));
+        digestEntry.write(lengthPrefixed(apkDigest));
+        byte[] digestsSection = lengthPrefixed(lengthPrefixed(digestEntry.toByteArray()));
+
+        // certs: LP sequence of LP X.509 certs
+        byte[] certsSection = lengthPrefixed(lengthPrefixed(cert.getEncoded()));
+
+        // additional attributes: empty LP sequence
+        byte[] attrsSection = lengthPrefixed(new byte[0]);
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(digestsSection);
+        out.write(certsSection);
+        out.write(attrsSection);
+        return out.toByteArray();
+    }
+
+    private static byte[] buildV2BlockValue(byte[] signedData, byte[] signature, byte[] pubKey)
+            throws IOException {
+        // signatures: LP sequence of LP (algoId + LP signature)
+        ByteArrayOutputStream sigEntry = new ByteArrayOutputStream();
+        sigEntry.write(leUint32(SIG_ALGO_RSA_PKCS1_SHA256));
+        sigEntry.write(lengthPrefixed(signature));
+        byte[] signaturesSection = lengthPrefixed(lengthPrefixed(sigEntry.toByteArray()));
+
+        // signer = LP signedData + LP signatures + LP pubkey
+        ByteArrayOutputStream signer = new ByteArrayOutputStream();
+        signer.write(lengthPrefixed(signedData));
+        signer.write(signaturesSection);
+        signer.write(lengthPrefixed(pubKey));
+
+        // v2 block value = LP sequence of LP signers (one signer)
+        return lengthPrefixed(lengthPrefixed(signer.toByteArray()));
+    }
+
+    private static byte[] buildSigningBlock(byte[] v2BlockValue) throws IOException {
+        // One ID-value pair: uint64 pairLen + uint32 id + value
+        ByteArrayOutputStream pairContent = new ByteArrayOutputStream();
+        pairContent.write(leUint32(V2_BLOCK_ID));
+        pairContent.write(v2BlockValue);
+        byte[] pair = pairContent.toByteArray();
+
+        long pairLen = pair.length;
+        long blockSize = 8 /*pair-len field*/ + pairLen + 8 /*trailing size*/ + 16 /*magic*/;
+
+        ByteArrayOutputStream block = new ByteArrayOutputStream();
+        block.write(leUint64(blockSize));
+        block.write(leUint64(pairLen));
+        block.write(pair);
+        block.write(leUint64(blockSize));
+        block.write(APK_SIG_BLOCK_MAGIC);
+        return block.toByteArray();
+    }
+
+    // ---- Binary helpers ----
+
+    private static int findEocd(byte[] apk) {
+        int maxSearch = Math.min(apk.length, 65557);
+        int startFrom = apk.length - 22;
+        int endAt = apk.length - maxSearch;
+        for (int i = startFrom; i >= endAt && i >= 0; i--) {
+            if (apk[i] == 0x50 && apk[i + 1] == 0x4B
+                    && apk[i + 2] == 0x05 && apk[i + 3] == 0x06) {
+                int commentLen = (apk[i + 20] & 0xFF) | ((apk[i + 21] & 0xFF) << 8);
+                if (i + 22 + commentLen == apk.length) return i;
+            }
+        }
+        return -1;
+    }
+
+    private static byte[] lengthPrefixed(byte[] data) throws IOException {
+        ByteArrayOutputStream o = new ByteArrayOutputStream(data.length + 4);
+        o.write(leUint32(data.length));
+        o.write(data);
+        return o.toByteArray();
+    }
+
+    private static byte[] leUint32(int v) {
+        return new byte[] {
+                (byte) v, (byte) (v >>> 8), (byte) (v >>> 16), (byte) (v >>> 24) };
+    }
+
+    private static byte[] leUint64(long v) {
+        byte[] r = new byte[8];
+        for (int i = 0; i < 8; i++) r[i] = (byte) (v >>> (i * 8));
+        return r;
+    }
+
+    private static int readUint32Le(byte[] b, int off) {
+        return (b[off] & 0xFF) | ((b[off + 1] & 0xFF) << 8)
+                | ((b[off + 2] & 0xFF) << 16) | ((b[off + 3] & 0xFF) << 24);
+    }
+
+    private static void writeUint32Le(byte[] b, int off, int v) {
+        b[off]     = (byte) v;
+        b[off + 1] = (byte) (v >>> 8);
+        b[off + 2] = (byte) (v >>> 16);
+        b[off + 3] = (byte) (v >>> 24);
+    }
+
+    private static byte[] readAllBytes(File f) throws IOException {
+        long len = f.length();
+        if (len > Integer.MAX_VALUE) throw new IOException("APK too large: " + len);
+        byte[] out = new byte[(int) len];
+        try (InputStream in = new FileInputStream(f)) {
+            int read = 0;
+            while (read < out.length) {
+                int n = in.read(out, read, out.length - read);
+                if (n < 0) throw new EOFException();
+                read += n;
+            }
+        }
+        return out;
+    }
+
+    private static String bytesToHex(byte[] b, int n) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < Math.min(n, b.length); i++) sb.append(String.format("%02x", b[i]));
+        return sb.toString();
     }
 
     // -----------------------------------------------------------------------
