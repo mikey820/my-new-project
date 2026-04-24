@@ -118,16 +118,10 @@ public class PatchActivity extends AppCompatActivity {
 
     /** Step 1 — uninstall original. */
     private void triggerUninstall() {
-        new AlertDialog.Builder(this)
-                .setTitle("Uninstall original app?")
-                .setMessage("The original app will be removed.\n\nAfter uninstalling, return here and the patched APK installer will launch automatically.")
-                .setPositiveButton("Uninstall", (d, w) -> {
-                    uninstallTriggered = true;
-                    logAdapter.add("Launching system uninstall dialog…");
-                    InstallHelper.promptUninstall(this, packageName);
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+        uninstallTriggered = true;
+        logAdapter.add("Launching system uninstall dialog…");
+        logRecycler.smoothScrollToPosition(logAdapter.getItemCount() - 1);
+        InstallHelper.promptUninstall(this, packageName);
     }
 
     /** Step 2 — install patched APK. */
